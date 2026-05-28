@@ -69,3 +69,13 @@ __pycache__/
 .eggs/
 
 # 
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/
+.beads/
+
+# bv (beads viewer) local config and caches
+.bv/

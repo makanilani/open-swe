@@ -6,6 +6,7 @@ import threading
 from deepagents.backends.protocol import SandboxBackendProtocol
 
 from agent.integrations.daytona import create_daytona_sandbox
+from agent.integrations.docker_sandbox import create_docker_sandbox
 from agent.integrations.langsmith import create_langsmith_sandbox
 from agent.integrations.local import create_local_sandbox
 from agent.integrations.modal import create_modal_sandbox
@@ -14,6 +15,7 @@ from agent.integrations.runloop import create_runloop_sandbox
 SANDBOX_FACTORIES = {
     "langsmith": create_langsmith_sandbox,
     "daytona": create_daytona_sandbox,
+    "docker": create_docker_sandbox,
     "modal": create_modal_sandbox,
     "runloop": create_runloop_sandbox,
     "local": create_local_sandbox,
@@ -56,7 +58,7 @@ async def create_sandbox(
     ``SANDBOX_MAX_CONCURRENT_CREATE`` (default 4).
 
     The provider is selected via the SANDBOX_TYPE environment variable.
-    Supported values: langsmith (default), daytona, modal, runloop, local.
+    Supported values: langsmith (default), daytona, docker, modal, runloop, local.
 
     Args:
         sandbox_id: Optional existing sandbox ID to reconnect to.
