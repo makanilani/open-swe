@@ -130,7 +130,7 @@ async def _create_and_start_container(
             host_config["Memory"] = _parse_mem(mem_limit)
         cpu_limit = os.getenv("DOCKER_SANDBOX_CPU_LIMIT")
         if cpu_limit:
-            host_config["NanoCpus"] = int(float(cpu_limit) * 1e9)
+            host_config["NanoCpus"] = int(cpu_limit)
         network = os.getenv("DOCKER_SANDBOX_NETWORK_MODE")
         if network:
             host_config["NetworkMode"] = network

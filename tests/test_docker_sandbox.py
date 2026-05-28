@@ -516,13 +516,13 @@ class TestDockerSandboxBackendConfig:
     def test_host_config_with_resources(self) -> None:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
-        cfg = DockerSandboxConfig(mem_limit="2g", cpu_limit=2.0, pids_limit=100)
+        cfg = DockerSandboxConfig(mem_limit="2g", cpu_limit=2000000000, pids_limit=100)
         sb = DockerSandboxBackend(cfg)
         config = sb._build_container_config()
         hc = config["HostConfig"]
 
         assert hc["Memory"] == 2 * 10**9
-        assert hc["NanoCpus"] == int(2.0 * 1e9)
+        assert hc["NanoCpus"] == 2000000000
         assert hc["PidsLimit"] == 100
 
 

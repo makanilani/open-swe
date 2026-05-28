@@ -84,9 +84,9 @@ class DockerSandboxConfig:
 
     image: str = field(default_factory=lambda: os.getenv("DOCKER_SANDBOX_IMAGE", DEFAULT_IMAGE))
     mem_limit: str | None = field(default_factory=lambda: os.getenv("DOCKER_SANDBOX_MEM_LIMIT"))
-    cpu_limit: float | None = field(
+    cpu_limit: int | None = field(
         default_factory=lambda: (
-            float(os.getenv("DOCKER_SANDBOX_CPU_LIMIT"))
+            int(os.getenv("DOCKER_SANDBOX_CPU_LIMIT"))
             if os.getenv("DOCKER_SANDBOX_CPU_LIMIT")
             else None
         )
@@ -309,7 +309,7 @@ class DockerSandboxBackend(SandboxBackendProtocol):
         if self._config.mem_limit:
             host_config["Memory"] = _parse_mem(self._config.mem_limit)
         if self._config.cpu_limit is not None:
-            host_config["NanoCpus"] = int(self._config.cpu_limit * 1e9)
+            host_config["NanoCpus"] = self._config.cpu_limit
         if self._config.pids_limit is not None:
             host_config["PidsLimit"] = self._config.pids_limit
         if self._config.network:

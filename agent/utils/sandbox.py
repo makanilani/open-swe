@@ -8,7 +8,7 @@ import threading
 from deepagents.backends.protocol import SandboxBackendProtocol
 
 from agent.integrations.daytona import create_daytona_sandbox
-from agent.integrations.docker_sandbox import create_docker_sandbox
+from agent.integrations.docker_sandbox import _parse_mem, create_docker_sandbox
 from agent.integrations.langsmith import create_langsmith_sandbox
 from agent.integrations.local import create_local_sandbox
 from agent.integrations.modal import create_modal_sandbox
@@ -121,7 +121,6 @@ def _validate_docker_config() -> None:
 
     int_fields = [
         "DOCKER_SANDBOX_CPU_LIMIT",
-        "DOCKER_SANDBOX_MEM_LIMIT",
         "DOCKER_SANDBOX_PID_LIMIT",
         "DOCKER_SANDBOX_TIMEOUT",
         "DOCKER_SANDBOX_WALL_CLOCK_GRACE",
@@ -138,6 +137,15 @@ def _validate_docker_config() -> None:
             int(raw)
         except ValueError as exc:
             raise ValueError(f"{field} must be an integer, got: {raw!r}") from exc
+
+    mem_limit = os.getenv("DOCKER_SANDBOX_MEM_LIMIT")
+    if mem_limit:
+        try:
+            _parse_mem(mem_limit)
+        except ValueError as exc:
+            raise ValueError(
+                f"DOCKER_SANDBOX_MEM_LIMIT must be an integer or suffixed value (e.g. 4g, 512m), got: {mem_limit!r}"
+            ) from exc
 
     _validate_docker_host()
 
