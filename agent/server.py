@@ -124,7 +124,7 @@ async def _create_sandbox_with_proxy() -> SandboxBackendProtocol:
     Uses create_sandbox (generic factory) so non-langsmith providers still work.
     For langsmith sandboxes, configures the proxy with the installation token.
     """
-    sandbox_backend = await asyncio.to_thread(create_sandbox)
+    sandbox_backend = await create_sandbox()
 
     sandbox_type = os.getenv("SANDBOX_TYPE", "langsmith")
     if sandbox_type == "langsmith":
@@ -301,7 +301,7 @@ async def ensure_sandbox_for_thread(thread_id: str) -> SandboxBackendProtocol:
         logger.info("Connecting to existing sandbox %s", sandbox_id)
         created_replacement_sandbox = False
         try:
-            sandbox_backend = await asyncio.to_thread(create_sandbox, sandbox_id)
+            sandbox_backend = await create_sandbox(sandbox_id=sandbox_id)
         except Exception:
             logger.warning("Failed to connect to existing sandbox %s, creating new one", sandbox_id)
             await client.threads.update(
