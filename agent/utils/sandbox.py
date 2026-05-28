@@ -1,6 +1,8 @@
 import asyncio
 import inspect
+import logging
 import os
+import sys
 import threading
 
 from deepagents.backends.protocol import SandboxBackendProtocol
@@ -98,6 +100,92 @@ def _validate_sandbox_max_concurrent() -> None:
         raise ValueError(msg)
 
 
+def _validate_docker_config() -> None:
+    """Validate Docker sandbox configuration at startup.
+
+    Checks:
+    - Python version >= 3.12 (required for tarfile.extractall(filter='data'))
+    - DOCKER_SANDBOX_IMAGE is set
+    - All int fields parse as integers
+    - DOCKER_HOST scheme validation (unix/ssh/tcp-with-tls only, unless insecure override)
+    """
+    if sys.version_info < (3, 12):
+        raise RuntimeError(
+            f"Docker sandbox requires Python 3.12+, got {sys.version_info.major}.{sys.version_info.minor}. "
+            "tarfile.extractall(filter='data') is not available in earlier versions."
+        )
+
+    image = os.getenv("DOCKER_SANDBOX_IMAGE")
+    if not image:
+        raise ValueError("DOCKER_SANDBOX_IMAGE must be set when SANDBOX_TYPE=docker")
+
+    int_fields = [
+        "DOCKER_SANDBOX_CPU_LIMIT",
+        "DOCKER_SANDBOX_MEM_LIMIT",
+        "DOCKER_SANDBOX_PID_LIMIT",
+        "DOCKER_SANDBOX_TIMEOUT",
+        "DOCKER_SANDBOX_WALL_CLOCK_GRACE",
+        "DOCKER_SANDBOX_MAX_CONCURRENT",
+        "DOCKER_SANDBOX_MAX_OUTPUT_BYTES",
+        "DOCKER_SANDBOX_CLEANUP_INTERVAL",
+        "DOCKER_SANDBOX_ORPHAN_TTL",
+    ]
+    for field in int_fields:
+        raw = os.getenv(field)
+        if raw is None or raw == "":
+            continue
+        try:
+            int(raw)
+        except ValueError as exc:
+            raise ValueError(f"{field} must be an integer, got: {raw!r}") from exc
+
+    _validate_docker_host()
+
+
+def _validate_docker_host() -> None:
+    """Validate DOCKER_HOST scheme for security.
+
+    Allowed schemes:
+    - unix://... (local socket) → OK
+    - ssh://... (SSH transport) → OK
+    - tcp://... with TLS (DOCKER_TLS_VERIFY=1 + DOCKER_CERT_PATH) → OK
+    - tcp://... without TLS → rejected unless DOCKER_SANDBOX_ALLOW_INSECURE_TCP=1 (logs WARN)
+    - Other schemes → ValueError
+
+    Raises ValueError for unsupported or insecure configurations.
+    """
+    logger = logging.getLogger("open_swe.docker")
+
+    host = os.getenv("DOCKER_HOST", "")
+    if not host:
+        return
+
+    if host.startswith("unix://") or host.startswith("ssh://"):
+        return
+
+    if host.startswith("tcp://"):
+        tls_verify = os.getenv("DOCKER_TLS_VERIFY") == "1"
+        cert_path = os.getenv("DOCKER_CERT_PATH")
+        allow_insecure = os.getenv("DOCKER_SANDBOX_ALLOW_INSECURE_TCP") == "1"
+
+        if tls_verify and cert_path:
+            return
+
+        if allow_insecure:
+            logger.warning(
+                "sandbox.insecure_tcp",
+                extra={"docker_host": host},
+            )
+            return
+
+        raise ValueError(
+            "tcp:// DOCKER_HOST requires DOCKER_TLS_VERIFY=1 + DOCKER_CERT_PATH, "
+            "or set DOCKER_SANDBOX_ALLOW_INSECURE_TCP=1 to override (not recommended)"
+        )
+
+    raise ValueError(f"Unsupported DOCKER_HOST scheme: {host}")
+
+
 def validate_sandbox_startup_config() -> None:
     """Validate the configured sandbox provider's env vars at server startup.
 
@@ -111,3 +199,5 @@ def validate_sandbox_startup_config() -> None:
         from agent.integrations.langsmith import LangSmithProvider
 
         LangSmithProvider.validate_startup_config()
+    elif sandbox_type == "docker":
+        _validate_docker_config()
