@@ -4,7 +4,11 @@ from unittest.mock import patch
 
 import pytest
 
-from agent.utils.sandbox import _validate_docker_config, _validate_docker_host
+from agent.utils.sandbox import (
+    _validate_docker_config,
+    _validate_docker_host,
+    validate_sandbox_startup_config,
+)
 
 
 class _VersionInfo:
@@ -105,6 +109,54 @@ class TestValidateDockerConfig:
                 clear=True,
             ):
                 _validate_docker_config()
+
+
+class TestValidateSandboxStartupConfig:
+    """Tests for the top-level validate_sandbox_startup_config dispatch."""
+
+    def test_docker_dispatch_passes_with_valid_config(self) -> None:
+        """Docker validation should pass with valid config."""
+        with patch("agent.utils.sandbox.sys") as mock_sys:
+            mock_sys.version_info = _VersionInfo(3, 12, 0)
+            with patch.dict(
+                "os.environ",
+                {
+                    "DOCKER_SANDBOX_IMAGE": "open-swe-sandbox:latest",
+                    "SANDBOX_TYPE": "docker",
+                },
+                clear=True,
+            ):
+                validate_sandbox_startup_config()
+
+    def test_docker_dispatch_rejects_missing_image(self) -> None:
+        """Docker validation should reject missing DOCKER_SANDBOX_IMAGE."""
+        with patch("agent.utils.sandbox.sys") as mock_sys:
+            mock_sys.version_info = _VersionInfo(3, 12, 0)
+            with patch.dict(
+                "os.environ",
+                {"SANDBOX_TYPE": "docker"},
+                clear=True,
+            ):
+                with pytest.raises(ValueError, match="DOCKER_SANDBOX_IMAGE must be set"):
+                    validate_sandbox_startup_config()
+
+    def test_langsmith_dispatch_does_not_call_docker(self) -> None:
+        """LangSmith validation should not call Docker validation."""
+        with patch.dict(
+            "os.environ",
+            {"SANDBOX_TYPE": "langsmith", "DEFAULT_SANDBOX_SNAPSHOT_ID": "snap-1"},
+            clear=True,
+        ):
+            validate_sandbox_startup_config()
+
+    def test_default_sandbox_type_langsmith(self) -> None:
+        """Default SANDBOX_TYPE should be langsmith (no Docker validation)."""
+        with patch.dict(
+            "os.environ",
+            {"DEFAULT_SANDBOX_SNAPSHOT_ID": "snap-1"},
+            clear=True,
+        ):
+            validate_sandbox_startup_config()
 
     def test_python_version_check_fails(self) -> None:
         """Python < 3.12 should fail validation."""

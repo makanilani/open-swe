@@ -50,7 +50,7 @@ from agent.integrations.docker_io_loop import run_async
 logger = logging.getLogger("open_swe.docker_sandbox")
 
 DEFAULT_IMAGE = "open-swe-sandbox:latest"
-DEFAULT_EXEC_TIMEOUT = 60
+DEFAULT_TIMEOUT = 300
 
 LABEL_SANDBOX = "open-swe-sandbox"
 LABEL_MANAGED = "open-swe-managed"
@@ -82,21 +82,25 @@ class DockerSandboxConfig:
     Parameters are read from environment variables when not explicitly set.
     """
 
-    image: str = field(default_factory=lambda: os.getenv("DOCKER_IMAGE", DEFAULT_IMAGE))
-    mem_limit: str | None = field(default_factory=lambda: os.getenv("DOCKER_MEM_LIMIT"))
+    image: str = field(default_factory=lambda: os.getenv("DOCKER_SANDBOX_IMAGE", DEFAULT_IMAGE))
+    mem_limit: str | None = field(default_factory=lambda: os.getenv("DOCKER_SANDBOX_MEM_LIMIT"))
     cpu_limit: float | None = field(
         default_factory=lambda: (
-            float(os.getenv("DOCKER_CPU_LIMIT")) if os.getenv("DOCKER_CPU_LIMIT") else None
+            float(os.getenv("DOCKER_SANDBOX_CPU_LIMIT"))
+            if os.getenv("DOCKER_SANDBOX_CPU_LIMIT")
+            else None
         )
     )
     pids_limit: int | None = field(
         default_factory=lambda: (
-            int(os.getenv("DOCKER_PIDS_LIMIT")) if os.getenv("DOCKER_PIDS_LIMIT") else None
+            int(os.getenv("DOCKER_SANDBOX_PID_LIMIT"))
+            if os.getenv("DOCKER_SANDBOX_PID_LIMIT")
+            else None
         )
     )
-    network: str | None = field(default_factory=lambda: os.getenv("DOCKER_NETWORK"))
+    network: str | None = field(default_factory=lambda: os.getenv("DOCKER_SANDBOX_NETWORK_MODE"))
     exec_timeout: int = field(
-        default_factory=lambda: int(os.getenv("DOCKER_EXEC_TIMEOUT", str(DEFAULT_EXEC_TIMEOUT)))
+        default_factory=lambda: int(os.getenv("DOCKER_SANDBOX_TIMEOUT", str(DEFAULT_TIMEOUT)))
     )
 
 

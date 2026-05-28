@@ -50,7 +50,7 @@ class TestBuildImageName:
             assert _build_image_name() == "open-swe-sandbox:latest"
 
     def test_from_env(self) -> None:
-        with patch.dict(os.environ, {"DOCKER_IMAGE": "my-registry/swe:1.0"}, clear=True):
+        with patch.dict(os.environ, {"DOCKER_SANDBOX_IMAGE": "my-registry/swe:1.0"}, clear=True):
             assert _build_image_name() == "my-registry/swe:1.0"
 
 
@@ -154,7 +154,7 @@ class TestDockerSandboxExecute:
 
     def test_default_timeout_from_env(self, fake_run_async) -> None:
         fake_run_async.return_value = ("", 0)
-        with patch.dict(os.environ, {"DOCKER_EXEC_TIMEOUT": "120"}):
+        with patch.dict(os.environ, {"DOCKER_SANDBOX_TIMEOUT": "120"}):
             sb = DockerSandbox("c1")
             sb.execute("echo hi")
             _kwargs = fake_run_async.call_args[1]

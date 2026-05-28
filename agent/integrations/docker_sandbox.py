@@ -43,7 +43,7 @@ logger = logging.getLogger("open_swe.docker_sandbox")
 # ---------------------------------------------------------------------------
 DEFAULT_IMAGE_TAG = "open-swe-sandbox:latest"
 DEFAULT_CONTAINER_PREFIX = "open-swe-"
-DEFAULT_EXEC_TIMEOUT = 60
+DEFAULT_EXEC_TIMEOUT = 300
 IMAGE_BUILD_TIMEOUT = 300  # seconds
 
 HEALTH_CHECK_INTERVAL = 0.5
@@ -60,7 +60,7 @@ def _random_suffix(length: int = 8) -> str:
 
 
 def _build_image_name() -> str:
-    return os.getenv("DOCKER_IMAGE", DEFAULT_IMAGE_TAG)
+    return os.getenv("DOCKER_SANDBOX_IMAGE", DEFAULT_IMAGE_TAG)
 
 
 def _build_container_name() -> str:
@@ -125,13 +125,13 @@ async def _create_and_start_container(
             env.append(f"GITHUB_PROXY_URL={github_proxy_url}")
 
         host_config: dict = {}
-        mem_limit = os.getenv("DOCKER_MEM_LIMIT")
+        mem_limit = os.getenv("DOCKER_SANDBOX_MEM_LIMIT")
         if mem_limit:
             host_config["Memory"] = _parse_mem(mem_limit)
-        cpu_limit = os.getenv("DOCKER_CPU_LIMIT")
+        cpu_limit = os.getenv("DOCKER_SANDBOX_CPU_LIMIT")
         if cpu_limit:
             host_config["NanoCpus"] = int(float(cpu_limit) * 1e9)
-        network = os.getenv("DOCKER_NETWORK")
+        network = os.getenv("DOCKER_SANDBOX_NETWORK_MODE")
         if network:
             host_config["NetworkMode"] = network
 
@@ -393,7 +393,9 @@ class DockerSandbox(BaseSandbox):
         if self._closed:
             return ExecuteResponse(output="", exit_code=1, truncated=False)
 
-        exec_timeout = timeout or int(os.getenv("DOCKER_EXEC_TIMEOUT", str(DEFAULT_EXEC_TIMEOUT)))
+        exec_timeout = timeout or int(
+            os.getenv("DOCKER_SANDBOX_TIMEOUT", str(DEFAULT_EXEC_TIMEOUT))
+        )
 
         try:
             out, exit_code = run_async(
