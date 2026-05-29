@@ -8,6 +8,7 @@ event loop via ``docker_io_loop.run_async`` so that the sync
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -212,24 +213,91 @@ async def _stop_and_remove_container(container_id: str) -> None:
         await _release_docker_client()
 
 
-async def _exec_in_container(
+async def _aexecute(
     container_id: str,
     command: str,
     timeout: int,
-) -> tuple[str, int]:
+) -> tuple[str, int, bool, bool]:
+    """Execute a command with timeout, streaming, and byte-accurate truncation.
+
+    Wraps *command* with GNU ``timeout --preserve-status`` so the
+    container-side ``timeout`` binary signals timeout via exit code 124.
+    Reads stdout/stderr separately from the Docker exec ``Stream``,
+    accumulates them as ``bytearray`` instances, truncates at **512 KiB
+    per stream before decoding** (byte-accurate), and inspects the final
+    exit code via ``exec_inspect``.
+
+    A wall-clock ``asyncio.wait_for`` guard (*timeout* + 5 s grace)
+    protects against a hung Docker daemon even when the GNU timeout
+    inside the container fails to fire.
+
+    Returns:
+        ``(combined_output, exit_code, timed_out, truncated)``.
+    """
+    _GRACE_PERIOD = 5
+    _MAX_OUTPUT_BYTES = 512 * 1024
+
+    wrapped = f"timeout --preserve-status {timeout}s {command}"
+
     client: Docker = await _get_docker_client()
     try:
         container: DockerContainer = await client.containers.get(container_id)
+
+        # -- Create the exec instance ----------------------------------------
         exec_obj = await container.exec(
-            cmd=["/bin/sh", "-c", command],
+            cmd=["/bin/sh", "-c", wrapped],
             stdout=True,
             stderr=True,
         )
-        raw: bytes = await exec_obj.start(detach=False)
-        out = raw.decode("utf-8", errors="replace")
+        stream = await exec_obj.start(detach=False)
+
+        stdout_buf = bytearray()
+        stderr_buf = bytearray()
+        truncated = False
+        wall_clock_timeout = False
+
+        # -- Stream stdout/stderr with per-read wall-clock guard -------------
+        try:
+            while True:
+                msg = await asyncio.wait_for(
+                    stream.read_out(),
+                    timeout=timeout + _GRACE_PERIOD,
+                )
+                if msg is None:
+                    break
+
+                if msg.extra == 1:  # stdout
+                    stdout_buf.extend(msg.data)
+                    if len(stdout_buf) > _MAX_OUTPUT_BYTES:
+                        stdout_buf = stdout_buf[:_MAX_OUTPUT_BYTES]
+                        truncated = True
+                elif msg.extra == 2:  # stderr
+                    stderr_buf.extend(msg.data)
+                    if len(stderr_buf) > _MAX_OUTPUT_BYTES:
+                        stderr_buf = stderr_buf[:_MAX_OUTPUT_BYTES]
+                        truncated = True
+        except TimeoutError:
+            wall_clock_timeout = True
+            await stream.close()
+
+        # -- Inspect exit code -----------------------------------------------
         inspect_data = await exec_obj.inspect()
         exit_code: int = inspect_data.get("ExitCode", -1)
-        return out, exit_code
+
+        timed_out = wall_clock_timeout or exit_code == 124
+
+        # -- Byte-accurate decoding (already truncated at byte level) --------
+        stdout_str = stdout_buf.decode("utf-8", errors="replace")
+        stderr_str = stderr_buf.decode("utf-8", errors="replace")
+
+        if stdout_str and stderr_str:
+            combined = stdout_str + "\n" + stderr_str
+        elif stderr_str:
+            combined = stderr_str
+        else:
+            combined = stdout_str
+
+        return combined, exit_code, timed_out, truncated
     finally:
         await _release_docker_client()
 
@@ -338,7 +406,7 @@ async def _put_archive_to_container(container_id: str, tar_data: bytes) -> None:
 
 async def _wait_for_healthy(container_id: str) -> None:
     for _attempt in range(1, HEALTH_CHECK_MAX_RETRIES + 1):
-        out, _ = await _exec_in_container(
+        out, _, _, _ = await _aexecute(
             container_id,
             "test -f /tmp/open-swe/ready",
             timeout=5,
@@ -354,7 +422,7 @@ async def _wait_for_healthy(container_id: str) -> None:
 
 async def _check_sleep(interval: float) -> None:
     """Async sleep bridge (runs via run_async → background loop)."""
-    await __import__("asyncio").sleep(interval)
+    await asyncio.sleep(interval)
 
 
 # -- memory parsing ---------------------------------------------------------
@@ -408,9 +476,9 @@ class DockerSandbox(BaseSandbox):
         )
 
         try:
-            out, exit_code = run_async(
-                _exec_in_container(self._container_id, command, exec_timeout),
-                timeout=exec_timeout,
+            out, exit_code, timed_out, truncated = run_async(
+                _aexecute(self._container_id, command, exec_timeout),
+                timeout=exec_timeout + 10,
             )
         except TimeoutError:
             return ExecuteResponse(
@@ -426,7 +494,9 @@ class DockerSandbox(BaseSandbox):
                 truncated=False,
             )
 
-        truncated = len(out) > 500 * 1024
+        if timed_out and exit_code > 0:
+            exit_code = -1
+
         return ExecuteResponse(output=out, exit_code=exit_code, truncated=truncated)
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:

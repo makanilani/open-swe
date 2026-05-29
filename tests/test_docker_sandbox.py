@@ -6,7 +6,7 @@ The ``run_async`` bridge is mocked so no real Docker daemon is needed.
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from deepagents.backends.protocol import (
@@ -110,7 +110,7 @@ class TestDockerSandboxId:
 
 class TestDockerSandboxExecute:
     def test_returns_output_and_exit_code(self, fake_run_async) -> None:
-        fake_run_async.return_value = ("hello world", 0)
+        fake_run_async.return_value = ("hello world", 0, False, False)
         sb = DockerSandbox("c1")
 
         result = sb.execute("echo hello")
@@ -121,14 +121,14 @@ class TestDockerSandboxExecute:
         assert result.truncated is False
 
     def test_propagates_timeout(self, fake_run_async) -> None:
-        fake_run_async.return_value = ("", 0)
+        fake_run_async.return_value = ("", 0, False, False)
         sb = DockerSandbox("c1")
         result = sb.execute("sleep 10", timeout=5)
         assert result.exit_code == 0
         _call_args = fake_run_async.call_args
         assert _call_args is not None
         _kwargs = _call_args[1]
-        assert _kwargs.get("timeout") == 5
+        assert _kwargs.get("timeout") == 15
 
     def test_returns_timeout_error_on_timeout(self, fake_run_async) -> None:
         fake_run_async.side_effect = TimeoutError("timed out")
@@ -151,7 +151,7 @@ class TestDockerSandboxExecute:
         fake_run_async.assert_not_called()
 
     def test_truncated_flag(self, fake_run_async) -> None:
-        fake_run_async.return_value = ("x" * 600_000, 0)
+        fake_run_async.return_value = ("x" * 600_000, 0, False, True)
         sb = DockerSandbox("c1")
 
         result = sb.execute("cat large_file")
@@ -159,12 +159,12 @@ class TestDockerSandboxExecute:
         assert result.truncated is True
 
     def test_default_timeout_from_env(self, fake_run_async) -> None:
-        fake_run_async.return_value = ("", 0)
+        fake_run_async.return_value = ("", 0, False, False)
         with patch.dict(os.environ, {"DOCKER_SANDBOX_TIMEOUT": "120"}):
             sb = DockerSandbox("c1")
             sb.execute("echo hi")
             _kwargs = fake_run_async.call_args[1]
-            assert _kwargs.get("timeout") == 120
+            assert _kwargs.get("timeout") == 130
 
 
 class TestDockerSandboxUploadFiles:
@@ -229,7 +229,7 @@ class TestDockerSandboxStart:
             None,  # _find_existing_container → None (create new)
             cid,  # _create_and_start_container
             None,  # _wait_for_healthy
-            ("", 0),  # _configure_git_credentials
+            ("", 0, False, False),  # _configure_git_credentials
         ]
 
         sb = DockerSandbox.start(gh_token="ghp_test")
@@ -274,7 +274,7 @@ class TestDockerSandboxStart:
             None,  # _ensure_image_exists
             existing_id,  # _find_existing_container → found
             None,  # _ensure_container_running
-            ("", 0),  # _configure_git_credentials
+            ("", 0, False, False),  # _configure_git_credentials
         ]
 
         sb = DockerSandbox.start(gh_token="ghp_abc")
@@ -391,7 +391,7 @@ class TestDockerSandboxBackendExecute:
     def test_returns_output_and_exit_code(self, fake_run_async) -> None:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
-        fake_run_async.return_value = ("hello world", 0)
+        fake_run_async.return_value = ("hello world", 0, False, False)
         sb = DockerSandboxBackend(DockerSandboxConfig())
         sb._container_id = "c1"
 
@@ -414,7 +414,7 @@ class TestDockerSandboxBackendExecute:
     def test_truncated_flag(self, fake_run_async) -> None:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
-        fake_run_async.return_value = ("x" * 600_000, 0)
+        fake_run_async.return_value = ("x" * 600_000, 0, False, True)
         sb = DockerSandboxBackend(DockerSandboxConfig())
         sb._container_id = "c1"
 
@@ -596,7 +596,7 @@ class TestDockerSandboxBackendLs:
     def test_lists_entries(self, fake_run_async) -> None:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
-        fake_run_async.return_value = ("file1.py\nsubdir/\nfile2.txt\n", 0)
+        fake_run_async.return_value = ("file1.py\nsubdir/\nfile2.txt\n", 0, False, False)
         sb = DockerSandboxBackend(DockerSandboxConfig())
         sb._container_id = "c1"
 
@@ -616,7 +616,7 @@ class TestDockerSandboxBackendLs:
     def test_empty_directory(self, fake_run_async) -> None:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
-        fake_run_async.return_value = ("", 0)
+        fake_run_async.return_value = ("", 0, False, False)
         sb = DockerSandboxBackend(DockerSandboxConfig())
         sb._container_id = "c1"
 
@@ -631,6 +631,8 @@ class TestDockerSandboxBackendLs:
         fake_run_async.return_value = (
             "ls: cannot access '/workspace/missing': No such file or directory\n",
             2,
+            False,
+            False,
         )
         sb = DockerSandboxBackend(DockerSandboxConfig())
         sb._container_id = "c1"
@@ -654,7 +656,7 @@ class TestDockerSandboxBackendRead:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
         fake_run_async.side_effect = [
-            ("", 1),  # test -d → not a directory
+            ("", 1, False, False),  # test -d → not a directory
             [FileDownloadResponse(path="/workspace/foo.py", content=b"line1\nline2\nline3\n")],
         ]
         sb = DockerSandboxBackend(DockerSandboxConfig())
@@ -672,7 +674,7 @@ class TestDockerSandboxBackendRead:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
         fake_run_async.side_effect = [
-            ("", 1),  # test -d → not a directory
+            ("", 1, False, False),  # test -d → not a directory
             [FileDownloadResponse(path="/workspace/empty.txt", content=b"")],
         ]
         sb = DockerSandboxBackend(DockerSandboxConfig())
@@ -687,7 +689,7 @@ class TestDockerSandboxBackendRead:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
         fake_run_async.side_effect = [
-            ("", 1),  # test -d → not a directory
+            ("", 1, False, False),  # test -d → not a directory
             [FileDownloadResponse(path="/workspace/missing.py", error="file_not_found")],
         ]
         sb = DockerSandboxBackend(DockerSandboxConfig())
@@ -701,7 +703,7 @@ class TestDockerSandboxBackendRead:
     def test_is_directory(self, fake_run_async) -> None:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
-        fake_run_async.return_value = ("", 0)  # test -d → is a directory
+        fake_run_async.return_value = ("", 0, False, False)  # test -d → is a directory
         sb = DockerSandboxBackend(DockerSandboxConfig())
         sb._container_id = "c1"
 
@@ -715,7 +717,7 @@ class TestDockerSandboxBackendRead:
 
         lines = "\n".join(f"line{i}" for i in range(10))
         fake_run_async.side_effect = [
-            ("", 1),  # test -d → not a directory
+            ("", 1, False, False),  # test -d → not a directory
             [FileDownloadResponse(path="/workspace/lines.txt", content=lines.encode())],
         ]
         sb = DockerSandboxBackend(DockerSandboxConfig())
@@ -740,8 +742,8 @@ class TestDockerSandboxBackendWrite:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
         fake_run_async.side_effect = [
-            ("", 1),  # test -f → file doesn't exist
-            ("", 0),  # mkdir -p succeeds
+            ("", 1, False, False),  # test -f → file doesn't exist
+            ("", 0, False, False),  # mkdir -p succeeds
             None,  # put_archive succeeds
         ]
         sb = DockerSandboxBackend(DockerSandboxConfig())
@@ -757,8 +759,8 @@ class TestDockerSandboxBackendWrite:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
         fake_run_async.side_effect = [
-            ("", 1),  # test -f → file doesn't exist
-            ("", 0),  # mkdir -p /
+            ("", 1, False, False),  # test -f → file doesn't exist
+            ("", 0, False, False),  # mkdir -p /
             None,  # put_archive
         ]
         sb = DockerSandboxBackend(DockerSandboxConfig())
@@ -772,7 +774,7 @@ class TestDockerSandboxBackendWrite:
     def test_file_already_exists(self, fake_run_async) -> None:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
-        fake_run_async.return_value = ("", 0)  # test -f → file exists
+        fake_run_async.return_value = ("", 0, False, False)  # test -f → file exists
         sb = DockerSandboxBackend(DockerSandboxConfig())
         sb._container_id = "c1"
 
@@ -785,8 +787,8 @@ class TestDockerSandboxBackendWrite:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
         fake_run_async.side_effect = [
-            ("", 1),  # test -f → file doesn't exist
-            ("permission denied", 1),  # mkdir fails
+            ("", 1, False, False),  # test -f → file doesn't exist
+            ("permission denied", 1, False, False),  # mkdir fails
         ]
         sb = DockerSandboxBackend(DockerSandboxConfig())
         sb._container_id = "c1"
@@ -800,8 +802,8 @@ class TestDockerSandboxBackendWrite:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
         fake_run_async.side_effect = [
-            ("", 1),  # test -f → file doesn't exist
-            ("", 0),  # mkdir -p succeeds
+            ("", 1, False, False),  # test -f → file doesn't exist
+            ("", 0, False, False),  # mkdir -p succeeds
             RuntimeError("disk full"),  # put_archive fails
         ]
         sb = DockerSandboxBackend(DockerSandboxConfig())
@@ -826,11 +828,11 @@ class TestDockerSandboxBackendEdit:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
         fake_run_async.side_effect = [
-            ("", 1),  # read: test -d → not a dir
+            ("", 1, False, False),  # read: test -d → not a dir
             [
                 FileDownloadResponse(path="/workspace/test.py", content=b"hello old world")
             ],  # read: download
-            ("", 0),  # _write_via_archive: mkdir -p
+            ("", 0, False, False),  # _write_via_archive: mkdir -p
             None,  # _write_via_archive: put_archive
         ]
         sb = DockerSandboxBackend(DockerSandboxConfig())
@@ -847,9 +849,9 @@ class TestDockerSandboxBackendEdit:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
         fake_run_async.side_effect = [
-            ("", 1),  # read: test -d → not a dir
+            ("", 1, False, False),  # read: test -d → not a dir
             [FileDownloadResponse(path="/workspace/test.py", content=b"a old b old c")],  # read
-            ("", 0),  # _write_via_archive: mkdir -p
+            ("", 0, False, False),  # _write_via_archive: mkdir -p
             None,  # _write_via_archive: put_archive
         ]
         sb = DockerSandboxBackend(DockerSandboxConfig())
@@ -864,7 +866,7 @@ class TestDockerSandboxBackendEdit:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
         fake_run_async.side_effect = [
-            ("", 1),  # test -d → not a dir
+            ("", 1, False, False),  # test -d → not a dir
             [FileDownloadResponse(path="/workspace/test.py", content=b"hello world")],
         ]
         sb = DockerSandboxBackend(DockerSandboxConfig())
@@ -880,7 +882,7 @@ class TestDockerSandboxBackendEdit:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
         fake_run_async.side_effect = [
-            ("", 1),  # test -d → not a dir
+            ("", 1, False, False),  # test -d → not a dir
             [FileDownloadResponse(path="/workspace/test.py", content=b"x x x")],
         ]
         sb = DockerSandboxBackend(DockerSandboxConfig())
@@ -908,6 +910,8 @@ class TestDockerSandboxBackendGrep:
         fake_run_async.return_value = (
             "/workspace/foo.py:42:def hello()\n/workspace/bar.py:10:hello world\n",
             0,
+            False,
+            False,
         )
         sb = DockerSandboxBackend(DockerSandboxConfig())
         sb._container_id = "c1"
@@ -928,7 +932,7 @@ class TestDockerSandboxBackendGrep:
     def test_no_matches(self, fake_run_async) -> None:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
-        fake_run_async.return_value = ("", 1)
+        fake_run_async.return_value = ("", 1, False, False)
         sb = DockerSandboxBackend(DockerSandboxConfig())
         sb._container_id = "c1"
 
@@ -940,7 +944,12 @@ class TestDockerSandboxBackendGrep:
     def test_error_exit_code(self, fake_run_async) -> None:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
-        fake_run_async.return_value = ("grep: /workspace: No such file or directory\n", 2)
+        fake_run_async.return_value = (
+            "grep: /workspace: No such file or directory\n",
+            2,
+            False,
+            False,
+        )
         sb = DockerSandboxBackend(DockerSandboxConfig())
         sb._container_id = "c1"
 
@@ -955,6 +964,8 @@ class TestDockerSandboxBackendGrep:
         fake_run_async.return_value = (
             "/workspace/foo:bar.py:7:result = x + y\n",
             0,
+            False,
+            False,
         )
         sb = DockerSandboxBackend(DockerSandboxConfig())
         sb._container_id = "c1"
@@ -984,6 +995,8 @@ class TestDockerSandboxBackendGlob:
             '{"path": "/workspace/foo.py", "is_dir": false}\n'
             '{"path": "/workspace/bar.py", "is_dir": false}\n',
             0,
+            False,
+            False,
         )
         sb = DockerSandboxBackend(DockerSandboxConfig())
         sb._container_id = "c1"
@@ -1002,7 +1015,7 @@ class TestDockerSandboxBackendGlob:
     def test_no_matches(self, fake_run_async) -> None:
         from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
 
-        fake_run_async.return_value = ("", 0)
+        fake_run_async.return_value = ("", 0, False, False)
         sb = DockerSandboxBackend(DockerSandboxConfig())
         sb._container_id = "c1"
 
@@ -1018,6 +1031,506 @@ class TestDockerSandboxBackendGlob:
         result = sb.glob("*.py")
         assert result.error == "sandbox closed"
         fake_run_async.assert_not_called()
+
+
+# ===========================================================================
+# DockerSandboxConfig
+# ===========================================================================
+
+
+class TestDockerSandboxConfig:
+    def test_defaults_from_env(self) -> None:
+        from agent.integrations.docker import DockerSandboxConfig
+
+        with patch.dict(
+            os.environ,
+            {
+                "DOCKER_SANDBOX_IMAGE": "my-image:1",
+                "DOCKER_SANDBOX_MEM_LIMIT": "4g",
+                "DOCKER_SANDBOX_CPU_LIMIT": "2000000000",
+                "DOCKER_SANDBOX_PID_LIMIT": "100",
+                "DOCKER_SANDBOX_NETWORK_MODE": "host",
+                "DOCKER_SANDBOX_TIMEOUT": "600",
+            },
+            clear=True,
+        ):
+            cfg = DockerSandboxConfig()
+            assert cfg.image == "my-image:1"
+            assert cfg.mem_limit == "4g"
+            assert cfg.cpu_limit == 2000000000
+            assert cfg.pids_limit == 100
+            assert cfg.network == "host"
+            assert cfg.exec_timeout == 600
+
+    def test_custom_overrides_env(self) -> None:
+        from agent.integrations.docker import DockerSandboxConfig
+
+        with patch.dict(
+            os.environ,
+            {
+                "DOCKER_SANDBOX_IMAGE": "env-image:1",
+                "DOCKER_SANDBOX_TIMEOUT": "300",
+            },
+            clear=True,
+        ):
+            cfg = DockerSandboxConfig(image="custom:2", exec_timeout=120)
+            assert cfg.image == "custom:2"
+            assert cfg.exec_timeout == 120
+
+    def test_defaults_when_env_missing(self) -> None:
+        from agent.integrations.docker import DEFAULT_IMAGE, DockerSandboxConfig
+
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = DockerSandboxConfig()
+            assert cfg.image == DEFAULT_IMAGE
+            assert cfg.mem_limit is None
+            assert cfg.cpu_limit is None
+            assert cfg.pids_limit is None
+            assert cfg.network is None
+            assert cfg.exec_timeout == 300
+
+
+# ===========================================================================
+# DockerSandboxBackend lifecycle
+# ===========================================================================
+
+
+class TestDockerSandboxBackendStart:
+    def test_creates_new_container(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.side_effect = [None, None]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+
+        result = sb.start(github_token="ghp_test")
+
+        assert result is sb
+        assert fake_run_async.call_count == 2
+
+    def test_reconnects_existing(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        existing_id = "existing-container-id"
+        fake_run_async.return_value = existing_id
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+
+        sb.start()
+
+        assert sb._container_id == existing_id
+        assert fake_run_async.call_count == 1
+
+    def test_already_started_returns_self(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.start()
+
+        assert result is sb
+        fake_run_async.assert_not_called()
+
+    def test_reconnect_falls_back_to_create(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.side_effect = [None, None]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+
+        sb.start()
+
+        assert fake_run_async.call_count == 2
+
+
+class TestDockerSandboxBackendCloseEdgeCases:
+    def test_close_without_container_is_noop(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb.close()
+
+        assert sb._closed is False
+        assert sb._container_id is None
+        fake_run_async.assert_not_called()
+
+    def test_close_after_daemon_disconnect(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.side_effect = RuntimeError("daemon gone")
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        sb.close()
+
+        assert sb._closed is True
+
+
+# ===========================================================================
+# _aexecute (async execution helper)
+# ===========================================================================
+
+
+class TestAExecute:
+    """Tests for the async ``_aexecute`` helper with mocked aiodocker.
+
+    The stream protocol used by ``_aexecute``:
+    - ``stream.read_out()`` → ``StreamMessage(extra=1, data=b"…")`` (stdout),
+      ``StreamMessage(extra=2, data=b"…")`` (stderr), or ``None`` (end).
+    """
+
+    @staticmethod
+    def _msg(extra: int, data: bytes) -> object:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(extra=extra, data=data)
+
+    @staticmethod
+    def _make_stream(messages: list[tuple[int, bytes]]) -> AsyncMock:
+        """Build a mock stream object."""
+        stream = AsyncMock()
+        stream.read_out = AsyncMock(side_effect=[TestAExecute._msg(*m) for m in messages] + [None])
+        return stream
+
+    async def test_creates_exec_with_demux(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from agent.integrations.docker_sandbox import _aexecute
+
+        stream = self._make_stream([(1, b"hello\n")])
+        exec_obj = AsyncMock()
+        exec_obj._id = "exec1"
+        exec_obj.start = AsyncMock(return_value=stream)
+        exec_obj.inspect = AsyncMock(return_value={"ExitCode": 0})
+
+        mock_client = AsyncMock()
+        mock_container = AsyncMock()
+        mock_container.exec = AsyncMock(return_value=exec_obj)
+        mock_client.containers.get = AsyncMock(return_value=mock_container)
+
+        with patch(
+            "agent.integrations.docker_sandbox._get_docker_client", return_value=mock_client
+        ):
+            out, exit_code, timed_out, truncated = await _aexecute("c1", "echo hello", 30)
+
+        mock_container.exec.assert_called_once()
+        call_kwargs = mock_container.exec.call_args[1]
+        assert call_kwargs.get("stdout") is True
+        assert call_kwargs.get("stderr") is True
+        assert out == "hello\n"
+        assert exit_code == 0
+        assert timed_out is False
+        assert truncated is False
+
+    async def test_stdout_stderr_separated(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from agent.integrations.docker_sandbox import _aexecute
+
+        stream = self._make_stream([(1, b"out1\n"), (2, b"err1\n"), (1, b"out2\n")])
+        exec_obj = AsyncMock()
+        exec_obj._id = "exec1"
+        exec_obj.start = AsyncMock(return_value=stream)
+        exec_obj.inspect = AsyncMock(return_value={"ExitCode": 0})
+
+        mock_client = AsyncMock()
+        mock_container = AsyncMock()
+        mock_container.exec = AsyncMock(return_value=exec_obj)
+        mock_client.containers.get = AsyncMock(return_value=mock_container)
+
+        with patch(
+            "agent.integrations.docker_sandbox._get_docker_client", return_value=mock_client
+        ):
+            out, exit_code, timed_out, truncated = await _aexecute("c1", "cmd", 30)
+
+        assert "out1\nout2\n" in out
+        assert "err1\n" in out
+        assert exit_code == 0
+
+    async def test_wall_clock_timeout_handled(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from agent.integrations.docker_sandbox import _aexecute
+
+        stream = AsyncMock()
+        stream.read_out = AsyncMock(side_effect=TimeoutError("wall clock exceeded"))
+        stream.close = AsyncMock()
+        exec_obj = AsyncMock()
+        exec_obj._id = "exec1"
+        exec_obj.start = AsyncMock(return_value=stream)
+        exec_obj.inspect = AsyncMock(return_value={"ExitCode": -1})
+
+        mock_client = AsyncMock()
+        mock_container = AsyncMock()
+        mock_container.exec = AsyncMock(return_value=exec_obj)
+        mock_client.containers.get = AsyncMock(return_value=mock_container)
+
+        with patch(
+            "agent.integrations.docker_sandbox._get_docker_client", return_value=mock_client
+        ):
+            out, exit_code, timed_out, truncated = await _aexecute("c1", "sleep 100", 30)
+
+        stream.close.assert_awaited_once()
+        assert timed_out is True
+        assert exit_code == -1
+
+
+# ===========================================================================
+# DockerSandboxBackend file transfer
+# ===========================================================================
+
+
+class TestDockerSandboxBackendUpload:
+    def test_closed_returns_error(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        result = sb.upload_files([("/f", b"data")])
+        assert result[0].error == "sandbox closed"
+
+    def test_propagates_upload_responses(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = [
+            FileUploadResponse(path="/workspace/foo.py"),
+            FileUploadResponse(path="/workspace/bar.py"),
+        ]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        files = [("/workspace/foo.py", b"content1"), ("/workspace/bar.py", b"content2")]
+        result = sb.upload_files(files)
+
+        assert len(result) == 2
+        assert result[0].path == "/workspace/foo.py"
+        assert result[0].error is None
+
+    def test_reports_partial_failures(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = [
+            FileUploadResponse(path="/workspace/ok.py"),
+            FileUploadResponse(path="/workspace/fail.py", error="permission_denied"),
+        ]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        files = [("/workspace/ok.py", b"ok"), ("/workspace/fail.py", b"fail")]
+        result = sb.upload_files(files)
+
+        assert result[0].error is None
+        assert result[1].error == "permission_denied"
+
+
+class TestDockerSandboxBackendDownload:
+    def test_closed_returns_error(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        result = sb.download_files(["/f"])
+        assert result[0].error == "sandbox closed"
+
+    def test_propagates_download_responses(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = [
+            FileDownloadResponse(path="/workspace/foo.py", content=b"hello"),
+            FileDownloadResponse(path="/workspace/missing.py", error="file_not_found"),
+        ]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.download_files(["/workspace/foo.py", "/workspace/missing.py"])
+
+        assert result[0].path == "/workspace/foo.py"
+        assert result[0].content == b"hello"
+        assert result[1].path == "/workspace/missing.py"
+        assert result[1].error == "file_not_found"
+
+
+# ===========================================================================
+# Read — edge cases
+# ===========================================================================
+
+
+class TestDockerSandboxBackendReadEdgeCases:
+    def test_preserves_trailing_newline(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.side_effect = [
+            ("", 1, False, False),
+            [FileDownloadResponse(path="/f", content=b"line1\nline2\n")],
+        ]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.read("/f")
+
+        assert result.file_data["content"] == "line1\nline2\n"
+
+    def test_exact_bytes_fidelity(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        content = "hello\nworld\n\u00e9\u00e0\u00fc\n"
+        fake_run_async.side_effect = [
+            ("", 1, False, False),
+            [FileDownloadResponse(path="/f", content=content.encode("utf-8"))],
+        ]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.read("/f")
+
+        assert result.file_data["content"] == content
+
+
+# ===========================================================================
+# Glob — edge cases
+# ===========================================================================
+
+
+class TestDockerSandboxBackendGlobEdgeCases:
+    def test_no_shell_injection(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        captured: list[str] = []
+
+        def capture_exec(command: str, **kwargs: object) -> ExecuteResponse:
+            captured.append(command)
+            return ExecuteResponse(output="", exit_code=0, truncated=False)
+
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        with patch.object(sb, "execute", side_effect=capture_exec):
+            sb.glob("*.py", path="/workspace")
+
+        assert len(captured) == 1
+        cmd = captured[0]
+        assert "sys.argv" in cmd
+        assert "glob.glob" in cmd
+
+    def test_special_chars_in_pattern(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = ("", 0, False, False)
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.glob("**/[foo] bar? (baz).txt", path="/tmp")
+
+        assert result.error is None
+
+    def test_empty_output(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = ("", 0, False, False)
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.glob("*.nonexistent", path="/workspace")
+
+        assert result.matches == []
+
+    def test_json_decode_error_skips_line(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = (
+            '{"path": "/f", "is_dir": false}\nnot-json\n{"path": "/g", "is_dir": true}\n',
+            0,
+            False,
+            False,
+        )
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.glob("*", path="/")
+
+        assert result.error is None
+        assert len(result.matches) == 2
+
+    def test_error_response_in_json(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = (
+            '{"error": "Permission denied"}',
+            0,
+            False,
+            False,
+        )
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.glob("*", path="/root")
+
+        assert result.matches is None
+        assert "Permission denied" in result.error
+
+
+# ===========================================================================
+# Security
+# ===========================================================================
+
+
+class TestDockerSandboxSecurity:
+    def test_host_config_sets_non_root_user(self) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        config = sb._build_container_config()
+
+        assert config["User"] == "swe-user"
+        assert config["User"] != "root"
+
+    async def test_token_archive_has_0600_mode(self) -> None:
+        import tarfile
+        from io import BytesIO
+        from unittest.mock import AsyncMock
+
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        container = AsyncMock()
+        container._id = "c1"
+
+        await sb._inject_secrets(container, github_token="ghp_secret")
+
+        call_args = container.put_archive.call_args
+        tar_data = call_args[1]["data"]
+        buf = BytesIO(tar_data)
+        with tarfile.open(fileobj=buf) as tar:
+            members = tar.getmembers()
+            assert len(members) == 1
+            member = members[0]
+            assert member.mode == 0o600
+            assert "GH_TOKEN" in member.name
+
+    def test_host_config_readonly_rootfs(self) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        config = sb._build_container_config()
+        hc = config["HostConfig"]
+
+        assert hc["ReadonlyRootfs"] is True
+
+    def test_host_config_no_new_privileges(self) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        config = sb._build_container_config()
+        hc = config["HostConfig"]
+
+        assert "no-new-privileges:true" in hc["SecurityOpt"]
+
+    def test_insecure_tcp_rejected_by_default(self) -> None:
+        from agent.utils.sandbox import _validate_docker_host
+
+        with patch.dict(
+            os.environ,
+            {"DOCKER_HOST": "tcp://host:2375"},
+            clear=True,
+        ):
+            with pytest.raises(ValueError, match="DOCKER_TLS_VERIFY"):
+                _validate_docker_host()
 
 
 # ===========================================================================

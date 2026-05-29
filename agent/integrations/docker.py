@@ -190,12 +190,12 @@ class DockerSandboxBackend(SandboxBackendProtocol):
 
         exec_timeout = timeout or self._config.exec_timeout
 
-        from agent.integrations.docker_sandbox import _exec_in_container
+        from agent.integrations.docker_sandbox import _aexecute
 
         try:
-            out, exit_code = run_async(
-                _exec_in_container(self._container_id, command, exec_timeout),
-                timeout=exec_timeout,
+            out, exit_code, timed_out, truncated = run_async(
+                _aexecute(self._container_id, command, exec_timeout),
+                timeout=exec_timeout + 10,
             )
         except TimeoutError:
             return ExecuteResponse(
@@ -211,7 +211,9 @@ class DockerSandboxBackend(SandboxBackendProtocol):
                 truncated=False,
             )
 
-        truncated = len(out) > 500 * 1024
+        if timed_out and exit_code > 0:
+            exit_code = -1
+
         return ExecuteResponse(output=out, exit_code=exit_code, truncated=truncated)
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
