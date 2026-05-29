@@ -326,6 +326,16 @@ async def _download_files_from_container(
         await _release_docker_client()
 
 
+async def _put_archive_to_container(container_id: str, tar_data: bytes) -> None:
+    """Write a tar archive into the container at root path via put_archive."""
+    client: Docker = await _get_docker_client()
+    try:
+        container: DockerContainer = await client.containers.get(container_id)
+        await container.put_archive(path="/", data=tar_data)
+    finally:
+        await _release_docker_client()
+
+
 async def _wait_for_healthy(container_id: str) -> None:
     for _attempt in range(1, HEALTH_CHECK_MAX_RETRIES + 1):
         out, _ = await _exec_in_container(

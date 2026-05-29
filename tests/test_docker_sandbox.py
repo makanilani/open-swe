@@ -10,9 +10,15 @@ from unittest.mock import patch
 
 import pytest
 from deepagents.backends.protocol import (
+    EditResult,
     ExecuteResponse,
     FileDownloadResponse,
     FileUploadResponse,
+    GlobResult,
+    GrepResult,
+    LsResult,
+    ReadResult,
+    WriteResult,
 )
 
 from agent.integrations.docker_sandbox import (
@@ -579,6 +585,439 @@ class TestDockerSandboxErrors:
         assert isinstance(result, ExecuteResponse)
         assert result.exit_code == -1
         assert "connection refused" in result.output
+
+
+# ===========================================================================
+# DockerSandboxBackend file operations
+# ===========================================================================
+
+
+class TestDockerSandboxBackendLs:
+    def test_lists_entries(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = ("file1.py\nsubdir/\nfile2.txt\n", 0)
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.ls("/workspace")
+
+        assert isinstance(result, LsResult)
+        assert result.error is None
+        assert result.entries is not None
+        assert len(result.entries) == 3
+        assert result.entries[0]["path"] == "/workspace/file1.py"
+        assert result.entries[0]["is_dir"] is False
+        assert result.entries[1]["path"] == "/workspace/subdir"
+        assert result.entries[1]["is_dir"] is True
+        assert result.entries[2]["path"] == "/workspace/file2.txt"
+        assert result.entries[2]["is_dir"] is False
+
+    def test_empty_directory(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = ("", 0)
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.ls("/workspace/empty")
+
+        assert result.error is None
+        assert result.entries == []
+
+    def test_path_not_found(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = (
+            "ls: cannot access '/workspace/missing': No such file or directory\n",
+            2,
+        )
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.ls("/workspace/missing")
+
+        assert result.entries is None
+        assert "path_not_found" in result.error
+
+    def test_closed_sandbox(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        result = sb.ls("/workspace")
+        assert result.error == "sandbox closed"
+        fake_run_async.assert_not_called()
+
+
+class TestDockerSandboxBackendRead:
+    def test_reads_file(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.side_effect = [
+            ("", 1),  # test -d → not a directory
+            [FileDownloadResponse(path="/workspace/foo.py", content=b"line1\nline2\nline3\n")],
+        ]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.read("/workspace/foo.py")
+
+        assert isinstance(result, ReadResult)
+        assert result.error is None
+        assert result.file_data is not None
+        assert result.file_data["content"] == "line1\nline2\nline3\n"
+        assert result.file_data["encoding"] == "utf-8"
+
+    def test_empty_file(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.side_effect = [
+            ("", 1),  # test -d → not a directory
+            [FileDownloadResponse(path="/workspace/empty.txt", content=b"")],
+        ]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.read("/workspace/empty.txt")
+
+        assert result.error is None
+        assert result.file_data["content"] == ""
+
+    def test_file_not_found(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.side_effect = [
+            ("", 1),  # test -d → not a directory
+            [FileDownloadResponse(path="/workspace/missing.py", error="file_not_found")],
+        ]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.read("/workspace/missing.py")
+
+        assert result.file_data is None
+        assert "FileNotFoundError" in result.error
+
+    def test_is_directory(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = ("", 0)  # test -d → is a directory
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.read("/workspace")
+
+        assert result.file_data is None
+        assert "IsADirectoryError" in result.error
+
+    def test_pagination(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        lines = "\n".join(f"line{i}" for i in range(10))
+        fake_run_async.side_effect = [
+            ("", 1),  # test -d → not a directory
+            [FileDownloadResponse(path="/workspace/lines.txt", content=lines.encode())],
+        ]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.read("/workspace/lines.txt", offset=3, limit=3)
+
+        assert result.error is None
+        assert result.file_data["content"] == "line3\nline4\nline5"
+
+    def test_closed_sandbox(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        result = sb.read("/workspace/foo.py")
+        assert result.error == "sandbox closed"
+        fake_run_async.assert_not_called()
+
+
+class TestDockerSandboxBackendWrite:
+    def test_writes_file(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.side_effect = [
+            ("", 1),  # test -f → file doesn't exist
+            ("", 0),  # mkdir -p succeeds
+            None,  # put_archive succeeds
+        ]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.write("/workspace/test.py", "print('hello')")
+
+        assert isinstance(result, WriteResult)
+        assert result.error is None
+        assert result.path == "/workspace/test.py"
+
+    def test_writes_without_parent_dir(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.side_effect = [
+            ("", 1),  # test -f → file doesn't exist
+            ("", 0),  # mkdir -p /
+            None,  # put_archive
+        ]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.write("/test.txt", "hello")
+
+        assert result.error is None
+        assert result.path == "/test.txt"
+
+    def test_file_already_exists(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = ("", 0)  # test -f → file exists
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.write("/workspace/test.py", "content")
+
+        assert result.path is None
+        assert "already exists" in result.error
+
+    def test_mkdir_failure(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.side_effect = [
+            ("", 1),  # test -f → file doesn't exist
+            ("permission denied", 1),  # mkdir fails
+        ]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.write("/workspace/test.py", "content")
+
+        assert result.path is None
+        assert "Failed to create parent directory" in result.error
+
+    def test_put_archive_failure(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.side_effect = [
+            ("", 1),  # test -f → file doesn't exist
+            ("", 0),  # mkdir -p succeeds
+            RuntimeError("disk full"),  # put_archive fails
+        ]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.write("/workspace/test.py", "content")
+
+        assert result.path is None
+        assert "disk full" in result.error
+
+    def test_closed_sandbox(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        result = sb.write("/workspace/test.py", "content")
+        assert result.error == "sandbox closed"
+        fake_run_async.assert_not_called()
+
+
+class TestDockerSandboxBackendEdit:
+    def test_edit_single_occurrence(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.side_effect = [
+            ("", 1),  # read: test -d → not a dir
+            [
+                FileDownloadResponse(path="/workspace/test.py", content=b"hello old world")
+            ],  # read: download
+            ("", 0),  # _write_via_archive: mkdir -p
+            None,  # _write_via_archive: put_archive
+        ]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.edit("/workspace/test.py", "old", "new")
+
+        assert isinstance(result, EditResult)
+        assert result.error is None
+        assert result.path == "/workspace/test.py"
+        assert result.occurrences == 1
+
+    def test_edit_replace_all(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.side_effect = [
+            ("", 1),  # read: test -d → not a dir
+            [FileDownloadResponse(path="/workspace/test.py", content=b"a old b old c")],  # read
+            ("", 0),  # _write_via_archive: mkdir -p
+            None,  # _write_via_archive: put_archive
+        ]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.edit("/workspace/test.py", "old", "new", replace_all=True)
+
+        assert result.error is None
+        assert result.occurrences == 2
+
+    def test_edit_string_not_found(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.side_effect = [
+            ("", 1),  # test -d → not a dir
+            [FileDownloadResponse(path="/workspace/test.py", content=b"hello world")],
+        ]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.edit("/workspace/test.py", "missing", "new")
+
+        assert result.path is None
+        assert result.occurrences is None
+        assert "String not found" in result.error
+
+    def test_edit_multiple_without_replace_all(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.side_effect = [
+            ("", 1),  # test -d → not a dir
+            [FileDownloadResponse(path="/workspace/test.py", content=b"x x x")],
+        ]
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.edit("/workspace/test.py", "x", "y")
+
+        assert result.path is None
+        assert result.occurrences is None
+        assert "appears multiple times" in result.error
+
+    def test_closed_sandbox(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        result = sb.edit("/workspace/test.py", "old", "new")
+        assert result.error == "sandbox closed"
+        fake_run_async.assert_not_called()
+
+
+class TestDockerSandboxBackendGrep:
+    def test_matches_found(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = (
+            "/workspace/foo.py:42:def hello()\n/workspace/bar.py:10:hello world\n",
+            0,
+        )
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.grep("hello")
+
+        assert isinstance(result, GrepResult)
+        assert result.error is None
+        assert result.matches is not None
+        assert len(result.matches) == 2
+        assert result.matches[0]["path"] == "/workspace/foo.py"
+        assert result.matches[0]["line"] == 42
+        assert result.matches[0]["text"] == "def hello()"
+        assert result.matches[1]["path"] == "/workspace/bar.py"
+        assert result.matches[1]["line"] == 10
+        assert result.matches[1]["text"] == "hello world"
+
+    def test_no_matches(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = ("", 1)
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.grep("nonexistent")
+
+        assert result.error is None
+        assert result.matches == []
+
+    def test_error_exit_code(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = ("grep: /workspace: No such file or directory\n", 2)
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.grep("pattern", path="/workspace")
+
+        assert result.matches is None
+        assert "grep error" in result.error
+
+    def test_colons_in_filename(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = (
+            "/workspace/foo:bar.py:7:result = x + y\n",
+            0,
+        )
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.grep("x + y")
+
+        assert result.error is None
+        assert len(result.matches) == 1
+        assert result.matches[0]["path"] == "/workspace/foo:bar.py"
+        assert result.matches[0]["line"] == 7
+        assert result.matches[0]["text"] == "result = x + y"
+
+    def test_closed_sandbox(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        result = sb.grep("pattern")
+        assert result.error == "sandbox closed"
+        fake_run_async.assert_not_called()
+
+
+class TestDockerSandboxBackendGlob:
+    def test_matches_found(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = (
+            '{"path": "/workspace/foo.py", "is_dir": false}\n'
+            '{"path": "/workspace/bar.py", "is_dir": false}\n',
+            0,
+        )
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.glob("*.py", path="/workspace")
+
+        assert isinstance(result, GlobResult)
+        assert result.error is None
+        assert result.matches is not None
+        assert len(result.matches) == 2
+        assert result.matches[0]["path"] == "/workspace/foo.py"
+        assert result.matches[0]["is_dir"] is False
+        assert result.matches[1]["path"] == "/workspace/bar.py"
+        assert result.matches[1]["is_dir"] is False
+
+    def test_no_matches(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        fake_run_async.return_value = ("", 0)
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        sb._container_id = "c1"
+
+        result = sb.glob("*.nonexistent", path="/workspace")
+
+        assert result.error is None
+        assert result.matches == []
+
+    def test_closed_sandbox(self, fake_run_async) -> None:
+        from agent.integrations.docker import DockerSandboxBackend, DockerSandboxConfig
+
+        sb = DockerSandboxBackend(DockerSandboxConfig())
+        result = sb.glob("*.py")
+        assert result.error == "sandbox closed"
+        fake_run_async.assert_not_called()
 
 
 # ===========================================================================

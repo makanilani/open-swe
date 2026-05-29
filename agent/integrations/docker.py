@@ -13,6 +13,32 @@ Reconnect-first: ``start()`` always checks for an existing managed
 container (via the ``open-swe-managed`` label) before creating a new
 one.  Secrets are injected via ``put_archive`` **before** the container
 starts so the entrypoint script picks them up on first boot.
+
+File operations
+---------------
+All six :class:`BackendProtocol` file operations (``ls``, ``read``,
+``write``, ``edit``, ``grep``, ``glob``) are implemented directly on
+:class:`DockerSandboxBackend` rather than inherited from
+:class:`BaseSandbox`.  Key differences from the ``BaseSandbox``
+execute-based defaults:
+
+* **read / write / edit** — use Docker archive APIs
+  (``get_archive`` / ``put_archive``) instead of execute-based Python
+  scripts, avoiding large-file hangs and shell-quoting bugs.
+* **write** — fails if the target file already exists (matching
+  ``BaseSandbox._write_preflight`` behaviour).
+* **grep** — uses ``grep -rHnFI`` (recursive, filename, line-number,
+  fixed-strings, ignore-binary).  Output is parsed with
+  ``rfind(':')``, so filenames containing colons are handled
+  correctly; matched lines whose text contains colons may be
+  silently dropped (opposite tradeoff to ``BaseSandbox``'s
+  ``split(":", 2)``, which breaks on colon-containing paths).
+* **ls** — uses ``ls -1F`` (``-F`` flag appends ``/`` to
+  directories), lighter than ``BaseSandbox``'s Python
+  ``os.scandir`` script.
+* **glob** — uses a Python one-liner with ``sys.argv`` (no string
+  interpolation), avoiding the RCE vector that affected earlier
+  template-based approaches.
 """
 
 from __future__ import annotations
@@ -22,6 +48,7 @@ import json
 import logging
 import os
 import random
+import shlex
 import string
 import tarfile
 import time
@@ -34,10 +61,17 @@ if TYPE_CHECKING:
     from aiodocker.containers import DockerContainer
 
 from deepagents.backends.protocol import (
+    EditResult,
     ExecuteResponse,
+    FileData,
     FileDownloadResponse,
     FileUploadResponse,
+    GlobResult,
+    GrepResult,
+    LsResult,
+    ReadResult,
     SandboxBackendProtocol,
+    WriteResult,
 )
 
 from agent.integrations.docker_client import (
@@ -110,6 +144,10 @@ class DockerSandboxBackend(SandboxBackendProtocol):
     Exposes a sync :class:`SandboxBackendProtocol` surface while delegating
     all Docker daemon I/O to async coroutines on a dedicated background
     event loop.
+
+    All six :class:`BackendProtocol` file operations are implemented
+    directly (see module docstring for behavioural differences from
+    :class:`BaseSandbox`).
 
     .. admonition:: Reconnect-first
        :class: tip
@@ -191,6 +229,217 @@ class DockerSandboxBackend(SandboxBackendProtocol):
         from agent.integrations.docker_sandbox import _download_files_from_container
 
         return run_async(_download_files_from_container(self._container_id, paths))
+
+    # -- File operations (BackendProtocol) --------------------------------------
+
+    def ls(self, path: str) -> LsResult:
+        if self._closed or self._container_id is None:
+            return LsResult(error="sandbox closed")
+
+        quoted = shlex.quote(path)
+        result = self.execute(f"ls -1F -- {quoted}")
+        if result.exit_code != 0:
+            err = result.output.strip()
+            if "No such file" in err or "cannot access" in err:
+                return LsResult(error=f"Path '{path}': path_not_found")
+            return LsResult(error=err or f"ls failed (exit {result.exit_code})")
+
+        entries: list[dict] = []
+        for line in result.output.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            is_dir = line.endswith("/")
+            name = line[:-1] if is_dir else line
+            full_path = os.path.join(path.rstrip("/"), name)
+            entries.append({"path": full_path, "is_dir": is_dir})
+        return LsResult(entries=entries)
+
+    def read(
+        self,
+        file_path: str,
+        offset: int = 0,
+        limit: int = 2000,
+    ) -> ReadResult:
+        if self._closed or self._container_id is None:
+            return ReadResult(error="sandbox closed")
+
+        check = self.execute(f"test -d {shlex.quote(file_path)}")
+        if check.exit_code == 0:
+            return ReadResult(error=f"File '{file_path}': IsADirectoryError")
+
+        responses = self.download_files([file_path])
+        resp = responses[0]
+        if resp.error:
+            if resp.error == "file_not_found":
+                return ReadResult(error=f"File '{file_path}': FileNotFoundError")
+            return ReadResult(error=resp.error)
+
+        raw = resp.content or b""
+        content = raw.decode("utf-8", errors="replace")
+
+        lines = content.split("\n")
+        page = lines[offset : offset + limit]
+        return ReadResult(file_data=FileData(content="\n".join(page), encoding="utf-8"))
+
+    def _write_via_archive(self, file_path: str, content: str) -> WriteResult:
+        parent = os.path.dirname(file_path)
+        if parent:
+            result = self.execute(f"mkdir -p {shlex.quote(parent)}")
+            if result.exit_code != 0:
+                return WriteResult(
+                    error=f"Failed to create parent directory: {result.output.strip()}"
+                )
+
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            tar_path = file_path.lstrip("/")
+            info = tarfile.TarInfo(name=tar_path)
+            encoded = content.encode("utf-8")
+            info.size = len(encoded)
+            info.mtime = int(time.time())
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(encoded))
+
+        from agent.integrations.docker_sandbox import _put_archive_to_container
+
+        try:
+            run_async(_put_archive_to_container(self._container_id, buf.getvalue()))
+        except Exception as exc:
+            logger.exception("Error writing file %s", file_path)
+            return WriteResult(error=f"Failed to write file '{file_path}': {exc}")
+
+        return WriteResult(path=file_path)
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        if self._closed or self._container_id is None:
+            return WriteResult(error="sandbox closed")
+
+        # Fail if file already exists (matching BaseSandbox preflight behavior)
+        exists = self.execute(f"test -f {shlex.quote(file_path)}")
+        if exists.exit_code == 0:
+            return WriteResult(error=f"File '{file_path}' already exists")
+
+        return self._write_via_archive(file_path, content)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        if self._closed or self._container_id is None:
+            return EditResult(error="sandbox closed")
+
+        read_result = self.read(file_path)
+        if read_result.error:
+            return EditResult(error=read_result.error)
+
+        content = read_result.file_data["content"]
+        count = content.count(old_string)
+
+        if count == 0:
+            return EditResult(error=f"Error: String not found in file: '{old_string}'")
+        if count > 1 and not replace_all:
+            return EditResult(
+                error=f"Error: String '{old_string}' appears multiple times. "
+                "Use replace_all=True to replace all occurrences."
+            )
+
+        new_content = (
+            content.replace(old_string, new_string)
+            if replace_all
+            else content.replace(old_string, new_string, 1)
+        )
+        write_result = self._write_via_archive(file_path, new_content)
+        if write_result.error:
+            return EditResult(error=write_result.error)
+
+        return EditResult(path=file_path, occurrences=count)
+
+    def grep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+    ) -> GrepResult:
+        if self._closed or self._container_id is None:
+            return GrepResult(error="sandbox closed")
+
+        search_path = shlex.quote(path or ".")
+        grep_opts = "-rHnFI"
+        glob_flag = ""
+        if glob:
+            glob_flag = f"--include={shlex.quote(glob)}"
+        pat = shlex.quote(pattern)
+
+        cmd = f"grep {grep_opts} {glob_flag} -e {pat} {search_path}"
+        result = self.execute(cmd)
+
+        if result.exit_code >= 2:
+            msg = result.output.strip() or f"grep exit code {result.exit_code}"
+            return GrepResult(error=f"grep error: {msg}")
+
+        output = result.output.rstrip()
+        if not output:
+            return GrepResult(matches=[])
+
+        matches: list[dict] = []
+        for line in output.split("\n"):
+            if not line:
+                continue
+            last_colon = line.rfind(":")
+            if last_colon == -1:
+                continue
+            text = line[last_colon + 1 :]
+            rest = line[:last_colon]
+            line_colon = rest.rfind(":")
+            if line_colon == -1:
+                continue
+            try:
+                line_num = int(rest[line_colon + 1 :])
+            except ValueError:
+                continue
+            matches.append({"path": rest[:line_colon], "line": line_num, "text": text})
+
+        return GrepResult(matches=matches)
+
+    def glob(self, pattern: str, path: str = "/") -> GlobResult:
+        if self._closed or self._container_id is None:
+            return GlobResult(error="sandbox closed")
+
+        script = (
+            "import sys,glob,os,json;"
+            "base=sys.argv[1];"
+            "pat=sys.argv[2];"
+            "if os.path.isdir(base):os.chdir(base);"
+            "for f in glob.glob(pat,recursive=True):"
+            "  print(json.dumps(dict(path=os.path.join(base,f),is_dir=os.path.isdir(f))))"
+        )
+        cmd = (
+            f"python3 -c {shlex.quote(script)} {shlex.quote(str(path))} {shlex.quote(str(pattern))}"
+        )
+        result = self.execute(cmd)
+
+        output = result.output.strip()
+        if not output:
+            return GlobResult(matches=[])
+
+        matches: list[dict] = []
+        for line in output.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict) and "error" in data:
+                return GlobResult(error=f"Path '{path}': {data['error']}")
+            matches.append({"path": data["path"], "is_dir": data["is_dir"]})
+
+        return GlobResult(matches=matches)
 
     # -- Lifecycle --------------------------------------------------------------
 
